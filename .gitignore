@@ -1,0 +1,14 @@
+
+.env
+tmp
+node_modules
+log
+package-lock.json
+ostad-v2-prod.batch.json
+ostad-v2-prod.course.json
+ostad-v2-prod.live.json
+ostad-v2-prod.user.json
+ostad-v2-prod.leaduser.json
+ostad-v2-prod.usertest.json
+ostad-v2-prod.lead.json
+data/
