@@ -180,6 +180,15 @@ const weeklyProgressSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+
+    weeklyPresentDayMinutes: {
+      type: Number,
+      default: 0,
+    },
+    weekDayForWeeklyTarget: {
+      type: Number,
+      default: 1,
+    },
   },
   { collection: "weeklyprogress" },
 )
@@ -410,7 +419,7 @@ class StreamService {
     if (progress.isFirstWeek) {
       await this.updateFirstWeekProgress(progress, dayNumber, durationMinutes)
     } else {
-      await this.updateRegularWeekProgress(progress, durationMinutes)
+      await this.updateRegularWeekProgress(progress, dayNumber, durationMinutes)
     }
   }
 
@@ -419,6 +428,7 @@ class StreamService {
     const dayProgress = progress.dailyProgress[dayIndex]
 
     dayProgress.totalMinutes += durationMinutes
+    progress.totalWeeklyMinutes += durationMinutes
 
     if (dayProgress.totalMinutes >= 60 && !dayProgress.isPresent) {
       dayProgress.isPresent = true
@@ -466,8 +476,44 @@ class StreamService {
     await progress.save()
   }
 
-  async updateRegularWeekProgress(progress, durationMinutes) {
-    progress.totalWeeklyMinutes += durationMinutes
+  async updateRegularWeekProgress(progress, dayNumber, durationMinutes) {
+    // logic to handle mx five hours per day on weekly progress
+    const presentDayPreviousMinutes = progress.weeklyPresentDayMinutes
+    const presentWeekDay = progress.weekDayForWeeklyTarget
+    const dailyTargetHour = 5 * 60
+
+    let todayActulaStreamMinutes = durationMinutes
+
+    // when present day and 5 hour limit reached
+    if (
+      dayNumber === presentWeekDay &&
+      presentDayPreviousMinutes >= dailyTargetHour
+    ) {
+      return
+    }
+
+    // when present day but 5 hour limit not reached
+    if (
+      dayNumber === presentWeekDay &&
+      presentDayPreviousMinutes < dailyTargetHour
+    ) {
+      if (durationMinutes + presentDayPreviousMinutes > dailyTargetHour) {
+        todayActulaStreamMinutes = dailyTargetHour - presentDayPreviousMinutes
+      }
+    }
+
+    // if different day
+    if (dayNumber !== presentWeekDay) {
+      if (durationMinutes > dailyTargetHour) {
+        todayActulaStreamMinutes = dailyTargetHour
+      }
+
+      progress.weekDayForWeeklyTarget = dayNumber
+    }
+
+    // upper part to handle max limit per day
+
+    progress.totalWeeklyMinutes += todayActulaStreamMinutes
     const totalHours = Math.floor(progress.totalWeeklyMinutes / 60)
 
     if (progress.weekNumber >= 2) {
@@ -499,8 +545,9 @@ class StreamService {
       }
 
       progress.gemsEarned = (progress.gemsEarned || 0) + gemsEarned
-      progress.beansEarned = Math.floor(progress.gemsEarned * 0.15)
     }
+
+    progress.weeklyPresentDayMinutes += todayActulaStreamMinutes
 
     await progress.save()
   }
@@ -611,6 +658,7 @@ class StreamService {
       // Update the progress with the new reward claim date and amount
       progress.rewardClaimDate = new Date()
       progress.rewardClaimedAmount += hostRewardToClaimNow
+      progress.beansEarned += agencyRewardToClaimNow
       await progress.save({ session })
 
       await session.commitTransaction()
@@ -695,7 +743,12 @@ class StreamService {
       }
 
       dayProgress.rewardClaimedAmount += hostRewardToClaimNow
-      dayProgress.rewardClaimDate = new Date()
+      dayProgress.rewardClaimDate = currentDate
+
+      progress.rewardClaimedAmount += hostRewardToClaimNow
+      progress.beansEarned += agencyRewardToClaimNow
+      progress.rewardClaimDate = currentDate
+
       await progress.save({ session })
 
       await session.commitTransaction()
@@ -965,7 +1018,7 @@ async function testProgressiveScenario() {
       const stream2 = await streamService.startStream(user._id, stream._id)
       stream2.startTime = new Date(Date.now() - 60 * 60 * 1000)
       await stream2.save()
-      await streamService.endStream(stream2._id)
+      await streamService.endStream(user._id, stream2._id)
 
       const claim = await streamService.claimDailyReward(user._id, day)
       console.log(`🚫 ${claim.message} → ${claim.gemsEarned} gems`)
@@ -983,7 +1036,8 @@ async function testProgressiveScenario() {
     )
     await currentUser.save()
 
-    //! 10 hours in 2 times
+    // same day 3 stream on week 2 1st day
+
     stream = new Stream({
       userId: user._id,
       startTime: new Date(),
@@ -991,9 +1045,39 @@ async function testProgressiveScenario() {
     await stream.save()
 
     const week21Stream = await streamService.startStream(user._id, stream._id)
-    week21Stream.startTime = new Date(Date.now() - 5 * 60 * 60 * 1000) // Exactly 5 hours
+    week21Stream.startTime = new Date(Date.now() - 4 * 60 * 60 * 1000) // Exactly 4 hours
     await week21Stream.save()
-    await streamService.endStream(week21Stream._id)
+    await streamService.endStream(user._id, week21Stream._id)
+
+    stream = new Stream({
+      userId: user._id,
+      startTime: new Date(),
+    })
+    await stream.save()
+
+    const week2Stream2 = await streamService.startStream(user._id, stream._id)
+    week2Stream2.startTime = new Date(Date.now() - 4 * 60 * 60 * 1000) // Exactly 4 hours
+    await week2Stream2.save()
+    await streamService.endStream(user._id, week2Stream2._id)
+
+    stream = new Stream({
+      userId: user._id,
+      startTime: new Date(),
+    })
+    await stream.save()
+
+    const week2Stream3 = await streamService.startStream(user._id, stream._id)
+    week2Stream3.startTime = new Date(Date.now() - 4 * 60 * 60 * 1000) // Exactly 4 hours
+    await week2Stream3.save()
+    await streamService.endStream(user._id, week2Stream3._id)
+
+    //todo: set to day 2 of week 1
+
+    currentUser = await User.findById(user._id)
+    currentUser.starHostStartDate = new Date(
+      Date.now() - 8 * 24 * 60 * 60 * 1000,
+    )
+    await currentUser.save()
 
     stream = new Stream({
       userId: user._id,
@@ -1002,12 +1086,33 @@ async function testProgressiveScenario() {
     await stream.save()
 
     const week22Stream = await streamService.startStream(user._id, stream._id)
-    week22Stream.startTime = new Date(Date.now() - 15 * 60 * 60 * 1000) // Exactly 15 hours
+    week22Stream.startTime = new Date(Date.now() - 10 * 60 * 60 * 1000) // Exactly 10 hours
     await week22Stream.save()
-    await streamService.endStream(week22Stream._id)
+    await streamService.endStream(user._id, week22Stream._id)
+
+    //todo:  set to day 3 of week 1
+
+    currentUser = await User.findById(user._id)
+    currentUser.starHostStartDate = new Date(
+      Date.now() - 9 * 24 * 60 * 60 * 1000,
+    )
+    await currentUser.save()
+
+    stream = new Stream({
+      userId: user._id,
+      startTime: new Date(),
+    })
+    await stream.save()
+
+    const week23Stream = await streamService.startStream(user._id, stream._id)
+    week23Stream.startTime = new Date(Date.now() - 3 * 60 * 60 * 1000) // Exactly 3 hours
+    await week23Stream.save()
+    await streamService.endStream(user._id, week23Stream._id)
 
     const week2Claim = await streamService.claimWeeklyReward(user._id, 2)
     console.log(`💰 ${week2Claim.message}`)
+
+    return
 
     // =================== WEEK 3 - COMPLETED 15 HOURS ===================
     console.log("\n📅 WEEK 3 - COMPLETED 15 HOURS → GETS GEMS")
