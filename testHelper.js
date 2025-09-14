@@ -225,6 +225,19 @@ class StarHostService {
   async makeStarHost(userId, agency) {
     const session = await mongoose.startSession()
     session.startTransaction()
+    const now = new Date()
+
+    const utcToday = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        2,
+        0,
+        0,
+        0,
+      ),
+    )
 
     try {
       //todo: startday is next day 00:00
@@ -232,7 +245,7 @@ class StarHostService {
         userId,
         {
           isStarHost: true,
-          starHostStartDate: new Date(),
+          starHostStartDate: utcToday,
           agency: agency,
         },
         { session },
@@ -260,9 +273,21 @@ class StarHostService {
 
   async createFirstWeekProgress(userId, session) {
     //todo: weekly progress should start next day 00:00
-    const weekStartDate = new Date()
+    const now = new Date()
+    const utcToday = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        2,
+        0,
+        0,
+        0,
+      ),
+    )
+    const weekStartDate = utcToday
     const weekEndDate = new Date(weekStartDate)
-    weekEndDate.setDate(weekEndDate.getDate() + 6)
+    weekEndDate.setUTCDate(weekEndDate.getUTCDate() + 6)
 
     const dailyProgress = Array.from({ length: 7 }, (_, i) => ({
       day: i + 1,
@@ -396,20 +421,26 @@ class StreamService {
       const starHostService = new StarHostService()
       const weekInfo = await starHostService.getCurrentWeekInfo(userId)
 
-      progress = new WeeklyProgress({
-        userId,
-        weekNumber,
-        weekStartDate: weekInfo.weekStartDate,
-        weekEndDate: weekInfo.weekEndDate,
-        isFirstWeek: false,
-        hasMonetaryRewards: true, // Weeks 2, 3, 4 have money, 5+ don't
-        isStarted: true,
-        totalWeeklyMinutes: 0,
-        gemsEarned: 0,
-        beansEarned: 0,
-      })
-
-      await progress.save()
+      progress = await WeeklyProgress.findOneAndUpdate(
+        { userId, weekNumber },
+        {
+          userId,
+          weekNumber,
+          weekStartDate: weekInfo.weekStartDate,
+          weekEndDate: weekInfo.weekEndDate,
+          isFirstWeek: false,
+          hasMonetaryRewards: true, // Weeks 2, 3, 4 have money, 5+ don't
+          isStarted: true,
+          totalWeeklyMinutes: 0,
+          gemsEarned: 0,
+          beansEarned: 0,
+        },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true,
+        },
+      ).exec()
       const moneyStatus = "WITH MONETARY REWARDS"
       console.log(
         `📅 Auto-created Week ${weekNumber} progress (${moneyStatus})`,
@@ -478,11 +509,23 @@ class StreamService {
 
   async updateRegularWeekProgress(progress, dayNumber, durationMinutes) {
     // logic to handle mx five hours per day on weekly progress
-    const presentDayPreviousMinutes = progress.weeklyPresentDayMinutes
+    let presentDayPreviousMinutes = progress.weeklyPresentDayMinutes
     const presentWeekDay = progress.weekDayForWeeklyTarget
     const dailyTargetHour = 5 * 60
 
     let todayActulaStreamMinutes = durationMinutes
+
+    // if different day
+
+    if (dayNumber !== presentWeekDay) {
+      if (durationMinutes > dailyTargetHour) {
+        todayActulaStreamMinutes = dailyTargetHour
+      }
+
+      progress.weekDayForWeeklyTarget = dayNumber
+      progress.weeklyPresentDayMinutes = 0
+      presentDayPreviousMinutes = 0
+    }
 
     // when present day and 5 hour limit reached
     if (
@@ -502,18 +545,11 @@ class StreamService {
       }
     }
 
-    // if different day
-    if (dayNumber !== presentWeekDay) {
-      if (durationMinutes > dailyTargetHour) {
-        todayActulaStreamMinutes = dailyTargetHour
-      }
-
-      progress.weekDayForWeeklyTarget = dayNumber
-    }
-
     // upper part to handle max limit per day
 
     progress.totalWeeklyMinutes += todayActulaStreamMinutes
+    progress.weeklyPresentDayMinutes += todayActulaStreamMinutes
+
     const totalHours = Math.floor(progress.totalWeeklyMinutes / 60)
 
     if (progress.weekNumber >= 2) {
@@ -546,8 +582,6 @@ class StreamService {
 
       progress.gemsEarned = (progress.gemsEarned || 0) + gemsEarned
     }
-
-    progress.weeklyPresentDayMinutes += todayActulaStreamMinutes
 
     await progress.save()
   }
@@ -634,7 +668,7 @@ class StreamService {
           userId,
           {
             // Increment the user's gems by the amount to claim now
-            $inc: { gems: hostRewardToClaimNow },
+            $inc: { star_host_reward: hostRewardToClaimNow },
           },
           { session },
         )
@@ -669,6 +703,7 @@ class StreamService {
         gemsEarned: hostRewardToClaimNow,
         beansEarned: agencyRewardToClaimNow,
         message: `Week ${weekNumber} rewards claimed! ${hostRewardToClaimNow} gems earned`,
+        amount: hostRewardToClaimNow,
       }
     } catch (error) {
       await session.abortTransaction()
@@ -726,7 +761,7 @@ class StreamService {
       await User.findByIdAndUpdate(
         userId,
         {
-          $inc: { gems: hostRewardToClaimNow },
+          $inc: { star_host_reward: hostRewardToClaimNow },
         },
         { session },
       )
@@ -762,6 +797,8 @@ class StreamService {
         message: dayProgress.isPunished
           ? `Day ${day} claimed - PUNISHED (${hostRewardToClaimNow} gems)`
           : `Day ${day} claimed - NORMAL (${hostRewardToClaimNow} gems)`,
+
+        amount: hostRewardToClaimNow,
       }
     } catch (error) {
       await session.abortTransaction()
@@ -1085,8 +1122,30 @@ async function testProgressiveScenario() {
     })
     await stream.save()
 
-    const week22Stream = await streamService.startStream(user._id, stream._id)
-    week22Stream.startTime = new Date(Date.now() - 10 * 60 * 60 * 1000) // Exactly 10 hours
+    let week22Stream = await streamService.startStream(user._id, stream._id)
+    week22Stream.startTime = new Date(Date.now() - 47 * 60 * 1000) // Exactly 47 minutes
+    await week22Stream.save()
+    await streamService.endStream(user._id, week22Stream._id)
+
+    stream = new Stream({
+      userId: user._id,
+      startTime: new Date(),
+    })
+    await stream.save()
+
+    week22Stream = await streamService.startStream(user._id, stream._id)
+    week22Stream.startTime = new Date(Date.now() - 5 * 60 * 60 * 1000) // Exactly 5 hours
+    await week22Stream.save()
+    await streamService.endStream(user._id, week22Stream._id)
+
+    stream = new Stream({
+      userId: user._id,
+      startTime: new Date(),
+    })
+    await stream.save()
+
+    week22Stream = await streamService.startStream(user._id, stream._id)
+    week22Stream.startTime = new Date(Date.now() - 5 * 60 * 60 * 1000) // Exactly 5 hours
     await week22Stream.save()
     await streamService.endStream(user._id, week22Stream._id)
 

@@ -35,6 +35,7 @@
 		"mongoose": "8.17.0",
 		"morgan": "^1.10.0",
 		"supertest": "^7.0.0",
+		"typesense": "^2.1.0",
 		"uuid": "^9.0.1"
 	}
 }
